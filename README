@@ -1,0 +1,137 @@
+Codul sursa pentru emitator si receptor:
+1)kreceiver.c:
+- pentru primirea unui pachet m-am folosit de functia:
+*)int primire_pachet(msg *t,char *seq,msg **r,int asteaptaS)
+	-primeste ca parametri: 
+		*)t-mesajul trimis ultima data
+		*)seq-numarul de secventa al ultimului mesaj trimis
+		(de tip ACK sau NAK)
+		*)r-adresa unde se va salva mesajul primit
+		*)asteaptaS- parametru care spune daca se asteapta
+		un pachet de tip S (=1) sau nu (=0)
+	-asteapta un pachet de la ksender timp de maxim 5s
+	-in cazul in care nu se primeste niciun pachet sau daca seq-ul mesajului primit nu e cel 
+	asteptat ( (*r)->payload[2]!=((*seq)+1)%64 ), daca nu se asteapta un pachet de tip S (deci
+	 daca exista un mesaj trimis anterior), se trimite mesajul trimis anterior (t). Se mai 
+	asteapta primirea unui pachet corespunzator de maxim 2 ori (evidenta timeout-urilor este 
+	tinuta de contorul i ).
+	-in cazul in care se primeste mesajul asteptat (cu seq-ul corespunzator),se actualizeaza 
+	seq-ul (*seq=(*seq+1)%64) pentru a se putea trimite un nou mesaj (de tip ACK sau NAK) cu seq
+	-ul identic cu cel al mesajului primit si se verifica daca mesajul primit este corupt sau nu.
+	Se calculeaza suma de control a mesajului pe toate campurile in afara de CHECK si MARK 
+	(crc16_ccitt((*r)->payload,(int)data_len+4)) si se compara cu suma salvata in campul CHECK al 
+	mesajului ( *((unsigned short*)((*r)->payload+4+data_len)) ). In cazul in care cele doua sume 
+	sunt diferite, inseamna ca mesajul a fost corupt si se construieste un mesaj NAK cu seq-ul 
+	mesajului primit (construire_msg(t,*seq,'N')), se reseteaza contorul (i=0) si se reia procesul
+	 de primire a unui mesaj (continue;), de data aceasta pentru seq-ul incrementat.
+	-in cazul in care mesajul nu este corupt, se iese din bucla while(i<3). La iesirea din bucla, 
+	se verifica daca ultimul ACK/NAK a fost retrimis de trei ori si nu s-a primit un nou mesaj 
+	(sau daca s-a asteptat pachetul S de 3 ori si nu s-a primit), caz in care se trimite catre sender
+	 un mesaj de eroare ('E') si functia intoarce 1.
+	-daca mesajul primit este cel asteptat si nu e corupt, dar este de tip 'E'(eroare), atunci functia
+	 primire_pachet va intoarce 1 adica eroare si kreceiver se va inchide
+	-in continuare (daca mesajul primit nu e nici de tipul 'E'),trebuie trimis un mesaj ACK: 
+	daca s-a primit un mesaj de tipul S, se iese din functie pentru a se construi un ACK special, al 
+	carui camp data nu e vid ci e de tipul data_s si contine caracteristicile receptorului.
+	-pentru celelalte tipuri de mesaje primite, se trimite sender-ului un ACK normal care are campul 
+	data vid.
+	-in caz de succes, functia intoarce 0.
+
+*)void construire_msg(msg *t,char seq,char tip)
+	-construieste in t un pachet de confirmare a primirii mesajului seq, de tipul
+	ACK sau NAK, avand campul data vid.
+	-primeste ca parametri: *)t-adresa mesajului de trimis pe care il construieste
+				*)seq-numarul de secventa al mesajului pe care il confirma
+				si care trebuie sa fie identic cu cel al mesajului de confirmare
+				*)tip-tipul mesajului ('Y','N','E')
+
+*)void construire_confirmare_S(msg *t,char seq,void *data)
+	-construieste in t un pachet de confirmare a primirii mesajului seq de tipul 'S',
+	avand in campul data, informatiile de la adresa data, data ca parametru.
+	-primeste ca parametri: *)t-adresa mesajului de trimis pe care il construieste
+				*)seq-numarul de secventa al mesajului pe care il confirma
+				si care trebuie sa fie identic cu cel al mesajului de confirmare
+				*)data-adresa de la care se vor copia informatiile in campul data
+				al mesajului t. Cum data trebuie sa contina informatiile despre
+				configuratiile receptorului, acest parametru va fi transmis ca o
+				adresa a unei structuri de tipul data_s, initializata in functia
+				principala.
+
+Toate cele 3 functii construite vor fi apelate in functia principala int main() a modulului kreceiver.c:
+-foloseste variabila seq, care reprezinta numarul de secventa al ultimului mesaj primit (si deci
+a ultimului ACK/NAK trimis) si este initializata la -1 (seq pentru primul mesaj primit e 0).
+-primeste pachetul S prin apelul functiei primire_pachet cu parametrul asteaptaS=1. In caz de eroare
+(daca primire_pachet intoarce 1), functia principala intoarce si ea 1 si deci receptorul se inchide.
+-salveaza informatiile despre emitor din mesajul primit de la sender, in structura de tipul data_s:
+info_emitor
+-se construieste pachetul ACK pentru S, iar pentru functia construire_confirmare_S se plaseaza ca parametru 
+data, adresa structurii de tipul data_s: info_receptor, initializata cu proprietatile receptorului
+-se trimite pachetul ACK pentru S receptorului
+-se intra intr-o bucla while(1) in care se asteapta primirea unui pachet prin apelul functiei primire_pachet.
+In cazul in care pachetul primit este de tip 'B' (End of Transaction),in loc de 'F', se iese din bucla:
+	-se asteapta primirea unui pachet 'F', care contine numele fisierului deschis de emitor
+	-pe baza acestui nume de fisier, receptorul incearca crearea unui fisier recv_nume, iar in caz
+	de esec, i se trimite emitatorului un mesaj de tipul 'E' iar receptorul se inchide (return 2)
+	-se intra intr-o alta bucla while(1) in care se asteapta primirea din nou primirea unui pachet
+	prin apelul functiei primire_pachet. In cazul in care pachetul primit este de tip 'Z' (End of File),
+	in loc de 'D', se iese din bucla:
+		-se scriu in fisierul creat bytes-ii din campul data al mesajului primit
+		-in cazul unei erori la scrierea in fisier, i se trimite emitorului un mesaj de tip "E",iar
+		receptorul isi incheie activitatea, returnand 2
+2)ksender.c:
+- pentru trimiterea unui pachet m-am folosit de functia:
+*)int trimitere_msg(msg *t,char *seq,msg **r)
+	-primeste ca parametri: *)t -mesajul de trimis (deja construit)
+				*)seq -numarul de secventa al mesajului de trimis
+				*)r -adresa la care se va salva mesajul primit (de tip ACK/NAK/E)
+	-se trimite mesajul t, dupa care se asteapta primirea unui mesaj de confirmare (ACK/NAK)
+	-in cazul in care nu se primeste nimic (*r==NULL) sau mesajul primit nu e cel asteptat (nu
+	are numarul de secventa identic cu al mesajului trimis), mesajul se considera pierdut si se
+	repeta procedura: se mai trimite odata pachetul cu acelasi ACK (ok=0, ok spune daca se incrementeaza
+	campul seq sau nu) si se asteapta confirmarea. Bucla se poate repeta de maxim 3 ori, deoarece 
+	pachetele pierdute se pot retrimite de maxim 3 ori.
+	-in cazul in care se primeste un pachet cu seq corespunzator, se incrementeaza seq, pentru
+	a pregati trimiterea unui nou pachet.
+	-daca se primeste un pachet de tipu NAK, se reseteaza contorul (i=0) si se reia procesul de
+	retrimitere a unui mesaj, dar actualizand campul seq al mesajului vechi (ok=1) (se mai  
+	actualizeaza si suma de control)
+	-daca se primeste un pachet de tipul ACK, functia intoarce 0, adica succes.
+	-daca se primeste o eroare (un pachet de tipul E), functia intoarce 1, adica esec.
+	-in cazul in care mesajul t a fost pierdut de 3 ori consecutiv (pentru acelasi seq, adica pentru
+	acelasi pachet), la iesirea din bucla while(i<3) functia va intoarce 1, adica esec.
+
+*)void construire_msg(msg *t,void *data,unsigned char data_len,char seq, char tip)
+	-construieste la adresa t un pachet de tipul tip, avand numarul de secventa seq si in campul data
+	informatiile de la adresa data primita ca parametru, care ocupa un spatiu de data_len bytes.
+	-primeste ca parametri:*)t -adresa la care se va construi mesajul
+				*)data -adresa informatiilor care se vor pune in campul data al mesajului t
+				*)data_len -lungimea pe care o ocupa informatiile de la adresa data
+				*)seq -numarul de secventa al noului mesaj t
+				*)tip -tipul mesajului care se va contrui ('S','F','D','Z','B','E')
+Cele 2 functii construite vor fi apelate in functia principala int main() a modulului ksender.c:
+-foloseste variabila seq, care reprezinta numarul de secventa al mesajului care urmeaza sa fie trimis (si deci
+al ACK/NAK-ului care trebuie sa-l confirme) si este initializata la 0 (seq pentru primul mesaj trimis e 0).
+-se construieste pachetul S, iar pentru functia construire_msg se plaseaza ca parametru data, adresa
+structurii de tipul data_s: info_emitor, initializata cu proprietatile emitorului
+-se trimite pachetul S receptorului, prin apelul functiei trimitere_msg iar in caz de esec, emitorul se
+inchide returnand 1.
+-se salveaza informatiile despre configuratia receptorului in structura info_receptor
+-se trimit pe rand fisierele primite ca parametri la executia lui ksender in linia de comanda:
+	-se construieste si se trimite receptorului un mesaj de tipul 'F' cu numele fisierului
+	-se deschide fisierul iar in caz de eroare se trimite receptorului un pachet E si se inchide 
+	emitatorul, returnand 2
+	-se citesc pe rand cate MAXL bytes (dimensiunea maxima a campului data al mesajelor trimise de
+	emitator), iar in caz de eroare la citire se trimite un mesaj de tipul E si se inchide emitatorul,
+	returnand 2
+	-se trimite receptorului un mesaj de tipul 'D' cu bytes-ii cititi 
+	-in cazul in care au fost cititi din fisier mai putin de MAXL bytes, inseamna ca s-a terminat de citit
+	din fisier
+	-cand s-a terminat de citit dintr-un fisier, i se trimite receptorului un pachet de tipul 'Z' si se
+	inchide fisierul
+-cand s-a terminat de citit din toate fisierele, i se trimite receptorului un pachet de tipul 'B' si se inchide
+emitorul returnand 0
+
+3)lib.h:
+-Am definit structura data_s, care reprezinta modul in care sunt stocate informatiile despre emitator/receptor in
+campul data al unui pachet 'S' sau a unui pachet de tip ACK pentru 'S'.
+-Am definit functia afi_msg(msg *r), care primeste ca parametru un mesaj r, pentru afisarea mesajului r
